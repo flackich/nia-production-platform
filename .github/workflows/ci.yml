@@ -1,0 +1,49 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install -r app/requirements.txt pytest==8.4.2
+      - run: python -m pytest -q tests
+      - run: python scripts/setup.py
+      - run: docker compose up -d --build --wait --wait-timeout 180
+      - run: python scripts/smoke.py
+      - run: python scripts/verify_backup.py
+      - if: always()
+        run: docker compose logs --no-color --tail=100
+      - if: always()
+        run: docker compose down
+  publish:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Lowercase repository
+        run: echo "IMAGE_ROOT=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/build-push-action@v6
+        with:
+          context: app
+          push: true
+          tags: ghcr.io/${{ env.IMAGE_ROOT }}/api:${{ github.sha }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          tags: ghcr.io/${{ env.IMAGE_ROOT }}/frontend:${{ github.sha }}

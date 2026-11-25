@@ -1,0 +1,57 @@
+name: Deploy to cloud Swarm
+on:
+  workflow_dispatch:
+    inputs:
+      image_sha:
+        description: 'Successful build commit SHA (40 hexadecimal characters)'
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare deployment
+        env:
+          IMAGE_SHA: ${{ inputs.image_sha }}
+          CLOUD_HOST: ${{ secrets.CLOUD_HOST }}
+          CLOUD_USER: ${{ secrets.CLOUD_USER }}
+          CLOUD_SSH_KEY: ${{ secrets.CLOUD_SSH_KEY }}
+          CLOUD_KNOWN_HOSTS: ${{ secrets.CLOUD_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir -p ~/.ssh
+          printf '%s\n' "$CLOUD_SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$CLOUD_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          export IMAGE_API="ghcr.io/${GITHUB_REPOSITORY,,}/api:$IMAGE_SHA"
+          export IMAGE_FRONTEND="ghcr.io/${GITHUB_REPOSITORY,,}/frontend:$IMAGE_SHA"
+          export COOKIE_SECURE=1
+          python3 scripts/render_stack.py > stack.resolved.yml
+          ssh -o StrictHostKeyChecking=yes "$CLOUD_USER@$CLOUD_HOST" 'mkdir -p ~/production-deploy/monitoring ~/production-deploy/swarm'
+          scp -o StrictHostKeyChecking=yes stack.resolved.yml "$CLOUD_USER@$CLOUD_HOST:production-deploy/swarm/stack.yml"
+          scp -o StrictHostKeyChecking=yes monitoring/prometheus.yml "$CLOUD_USER@$CLOUD_HOST:production-deploy/monitoring/prometheus.yml"
+          ssh -o StrictHostKeyChecking=yes "$CLOUD_USER@$CLOUD_HOST" 'cd ~/production-deploy && docker stack deploy --with-registry-auth -c swarm/stack.yml production'
+      - name: Check convergence
+        env:
+          CLOUD_HOST: ${{ secrets.CLOUD_HOST }}
+          CLOUD_USER: ${{ secrets.CLOUD_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=yes "$CLOUD_USER@$CLOUD_HOST" 'python3 -' <<'PY'
+          import re, subprocess, time
+          for attempt in range(90):
+              out=subprocess.check_output(['docker','service','ls','--filter','label=com.docker.stack.namespace=production','--format','{{.Replicas}}'],text=True)
+              rows=[re.match(r'^(\d+)/(\d+)',line) for line in out.splitlines()]
+              if len(rows)==6 and all(row and row[1]==row[2] for row in rows):
+                  print('Six services converged')
+                  break
+              time.sleep(2)
+          else:
+              raise SystemExit('Deployment did not converge')
+          PY
