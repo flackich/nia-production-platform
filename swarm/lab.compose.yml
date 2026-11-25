@@ -1,0 +1,23 @@
+# Изолированный учебный кластер из двух Docker Engine, не меняет Swarm хоста.
+name: roman-swarm-lab
+services:
+  manager:
+    image: docker:28.5.1-dind
+    privileged: true
+    environment: {DOCKER_TLS_CERTDIR: ''}
+    command: ['--mtu=1400']
+    ports: ['127.0.0.1:18080:8080']
+    volumes: [manager_data:/var/lib/docker]
+    networks: [cluster]
+  worker:
+    image: docker:28.5.1-dind
+    privileged: true
+    environment: {DOCKER_TLS_CERTDIR: ''}
+    command: ['--mtu=1400']
+    volumes: [worker_data:/var/lib/docker]
+    networks: [cluster]
+networks:
+  cluster: {}
+volumes:
+  manager_data: {}
+  worker_data: {}

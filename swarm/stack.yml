@@ -1,0 +1,107 @@
+version: '3.8'
+services:
+  frontend:
+    image: ${IMAGE_FRONTEND:-production-frontend:local}
+    ports: ['8080:8080']
+    networks: [edge]
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '-', 'http://127.0.0.1:8080/health']
+      interval: 10s
+      retries: 5
+    deploy:
+      replicas: 2
+      update_config: {parallelism: 1, order: stop-first, failure_action: rollback}
+      restart_policy: {condition: on-failure, delay: 5s}
+      placement: {max_replicas_per_node: 1}
+  api:
+    image: ${IMAGE_API:-production-api:local}
+    environment:
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      SECRET_KEY_FILE: /run/secrets/session_key
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      MASTER_PASSWORD_FILE: /run/secrets/master_password
+      VIEWER_PASSWORD_FILE: /run/secrets/viewer_password
+      REDIS_URL: redis://redis:6379/0
+      SEED_DEMO: '1'
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+    secrets: [db_password, session_key, admin_password, master_password, viewer_password]
+    networks: [edge, backend, observability]
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request;urllib.request.urlopen('http://127.0.0.1:5000/health/ready')"]
+      interval: 10s
+      retries: 8
+      start_period: 60s
+    deploy:
+      replicas: 2
+      update_config: {parallelism: 1, order: stop-first, failure_action: rollback, monitor: 30s}
+      rollback_config: {parallelism: 1, order: stop-first}
+      restart_policy: {condition: on-failure, delay: 5s}
+      placement: {max_replicas_per_node: 1}
+  worker:
+    image: ${IMAGE_API:-production-api:local}
+    command: ['python', 'worker.py']
+    environment:
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      REDIS_URL: redis://redis:6379/0
+    secrets: [db_password]
+    networks: [backend]
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import os,time,redis;r=redis.Redis.from_url(os.environ['REDIS_URL']);assert time.time()-float(r.get('production:worker') or 0)<20"]
+      interval: 10s
+      retries: 6
+      start_period: 60s
+    deploy:
+      replicas: 1
+      restart_policy: {condition: on-failure, delay: 5s}
+  db:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: production
+      POSTGRES_DB: production
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    networks: [backend]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U production -d production']
+      interval: 5s
+      retries: 10
+    deploy:
+      replicas: 1
+      placement: {constraints: ['node.labels.production_data == true']}
+      restart_policy: {condition: on-failure, delay: 5s}
+  redis:
+    image: redis:7.4.6-alpine
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    networks: [backend]
+    deploy:
+      replicas: 1
+      restart_policy: {condition: on-failure, delay: 5s}
+  monitoring:
+    image: prom/prometheus:v3.7.3
+    command: ['--config.file=/etc/prometheus/prometheus.yml','--storage.tsdb.retention.time=3d']
+    configs:
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yml
+    volumes: [promdata:/prometheus]
+    networks: [observability]
+    deploy:
+      replicas: 1
+      placement: {constraints: ['node.labels.production_data == true']}
+      restart_policy: {condition: on-failure, delay: 5s}
+configs:
+  prometheus_config:
+    file: ../monitoring/prometheus.yml
+secrets:
+  db_password: {external: true}
+  session_key: {external: true}
+  admin_password: {external: true}
+  master_password: {external: true}
+  viewer_password: {external: true}
+networks:
+  edge: {driver: overlay, driver_opts: {encrypted: 'true'}}
+  backend: {driver: overlay, internal: true, driver_opts: {encrypted: 'true'}}
+  observability: {driver: overlay, internal: true}
+volumes:
+  pgdata: {}
+  promdata: {}
